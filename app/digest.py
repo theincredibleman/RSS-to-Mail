@@ -9,18 +9,21 @@ import pytz
 import requests
 import feedparser
 from bs4 import BeautifulSoup
+from urllib.parse import urljoin
 
 
-# -------------------------------------------------------------------
+# -----------------------------
 # Configuration
-# -------------------------------------------------------------------
+# -----------------------------
 
-# FEEDS must be set as an environment variable named `FEEDS`.
-# Accepts comma- or newline-separated URLs.
-_feeds_env = os.environ["FEEDS"].strip()
-FEEDS = [u.strip() for part in _feeds_env.splitlines() for u in part.split(",") if u.strip()]
+FEEDS = [
+    u.strip()
+    for part in os.environ["FEEDS"].strip().splitlines()
+    for u in part.split(",")
+    if u.strip()
+]
 
-LOCAL_TZ = pytz.timezone("Europe/Amsterdam")
+LOCAL_TZ = pytz.timezone(os.environ.get("LOCAL_TZ"))
 
 HEADERS = {
     "User-Agent": (
@@ -31,20 +34,18 @@ HEADERS = {
 }
 
 
-# -------------------------------------------------------------------
+# -----------------------------
 # Utilities
-# -------------------------------------------------------------------
+# -----------------------------
 
-def convert_pubdate(entry) -> str:
-    """Convert RSS pubDate to local timezone and format nicely."""
-    if not hasattr(entry, "published_parsed") or entry.published_parsed is None:
+def convert_pubdate(entry):
+    """Convert RSS pubDate to local timezone."""
+    if not getattr(entry, "published_parsed", None):
         return "No publication date available"
 
-    # Base timestamp
     dt = datetime.fromtimestamp(time.mktime(entry.published_parsed))
 
-    # Try parsing published string if available
-    if hasattr(entry, "published"):
+    if getattr(entry, "published", None):
         try:
             dt = datetime.strptime(entry.published, "%a, %d %b %Y %H:%M:%S %z")
         except Exception:
@@ -53,52 +54,75 @@ def convert_pubdate(entry) -> str:
     return dt.astimezone(LOCAL_TZ).strftime("%A, %d %B %Y %H:%M")
 
 
-def fetch_page(url: str, retries: int = 3) -> str | None:
-    """Fetch a webpage with retry logic and browser headers."""
-    for _ in range(retries):
-        try:
-            response = requests.get(url, headers=HEADERS, timeout=10)
-            if response.status_code == 200:
-                return response.text
-        except Exception:
-            pass
-
-        time.sleep(0.5 + random.random() * 0.5)
-
-    return None
+def fetch_page(url):
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=10)
+        return r.text if r.status_code == 200 else None
+    except Exception:
+        return None
 
 
-def extract_image_from_article(url: str) -> str | None:
-    """Extract the main image from an article."""
+def clean_image_url(url):
+    """Only allow absolute HTTPS URLs."""
+    if not url:
+        return None
+    url = url.strip()
+    if url in ["?", "#", "none", "null", "undefined", "/"]:
+        return None
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return None
+    if url.startswith("http://"):
+        return None
+    return url
+
+
+def extract_image_from_article(url):
+    """Scrape OpenGraph or first <img>."""
     html = fetch_page(url)
     if not html:
         return None
 
     soup = BeautifulSoup(html, "html.parser")
 
-    # Prefer OpenGraph image
+    def resolve(src):
+        if not src:
+            return None
+        return clean_image_url(urljoin(url, src))
+
     og = soup.find("meta", property="og:image")
-    if og and og.get("content"):
-        return og["content"]
+    if og:
+        img = resolve(og.get("content"))
+        if img:
+            return img
 
-    # Try article body
-    article = soup.find("article")
-    if article:
-        img = article.find("img")
-        if img and img.get("src"):
-            return img["src"]
+    img = soup.find("article img") or soup.find("img")
+    if img:
+        return resolve(img.get("src"))
 
-    # Fallback: any image
-    img = soup.find("img")
-    return img["src"] if img and img.get("src") else None
+    return None
 
 
-# -------------------------------------------------------------------
+def get_image(entry, link):
+    """Try feed images, then scrape."""
+    for field in ["media_content", "media_thumbnail"]:
+        if field in entry and entry[field]:
+            url = clean_image_url(entry[field][0].get("url"))
+            if url:
+                return url
+
+    if "enclosures" in entry and entry.enclosures:
+        url = clean_image_url(entry.enclosures[0].get("href"))
+        if url:
+            return url
+
+    return extract_image_from_article(link)
+
+
+# -----------------------------
 # HTML Rendering
-# -------------------------------------------------------------------
+# -----------------------------
 
-def render_item_html(title: str, link: str, pubdate: str, image_url: str | None) -> str:
-    """Render a single RSS item into HTML."""
+def render_item_html(title, link, pubdate, image_url):
     html = f"""
     <div style="margin-bottom: 30px; font-family: Arial, sans-serif;">
         <h2 style="margin-bottom: 5px;">
@@ -115,30 +139,21 @@ def render_item_html(title: str, link: str, pubdate: str, image_url: str | None)
         </div>
         """
 
-    html += "</div>"
-    return html
+    return html + "</div>"
 
 
-def build_email_body(items_html: list[str]) -> str:
-    """Wrap all items into a full HTML email body."""
-    return f"""
-    <html>
-    <body>
-    {''.join(items_html)}
-    </body>
-    </html>
-    """
+def build_email_body(items_html):
+    return f"<html><body>{''.join(items_html)}</body></html>"
 
 
-# -------------------------------------------------------------------
+# -----------------------------
 # Email Sending
-# -------------------------------------------------------------------
+# -----------------------------
 
-def send_email(html_body: str) -> None:
-    """Send the final HTML email."""
+def send_email(html_body):
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = "Daily BleepingComputer RSS Digest"
-    msg["From"] = f'BleepingComputer RSS Digest <{os.environ["SMTP_FROM"]}>'
+    msg["Subject"] = "Daily RSS Digest"
+    msg["From"] = f'RSS Digest <{os.environ["SMTP_FROM"]}>'
     msg["To"] = os.environ["EMAIL_TO"]
     msg.attach(MIMEText(html_body, "html"))
 
@@ -148,38 +163,36 @@ def send_email(html_body: str) -> None:
         smtp.send_message(msg)
 
 
-# -------------------------------------------------------------------
+# -----------------------------
 # Main Logic
-# -------------------------------------------------------------------
+# -----------------------------
 
-def process_feeds() -> None:
-    items_html = []
+def process_feeds():
+    all_items = []
 
     for feed_url in FEEDS:
         parsed = feedparser.parse(feed_url)
-
         for entry in parsed.entries:
-            title = entry.title
-            link = entry.link
-            pubdate = convert_pubdate(entry)
+            ts = (
+                time.mktime(entry.published_parsed)
+                if getattr(entry, "published_parsed", None)
+                else 0
+            )
+            all_items.append((ts, entry))
 
-            # Prefer media content from RSS
-            image_url = None
-            if "media_content" in entry and entry.media_content:
-                image_url = entry.media_content[0].get("url")
-            elif "media_thumbnail" in entry and entry.media_thumbnail:
-                image_url = entry.media_thumbnail[0].get("url")
+    all_items.sort(key=lambda x: x[0], reverse=True)
 
-            # Fallback: scrape article
-            if not image_url:
-                image_url = extract_image_from_article(link)
+    items_html = []
+    for _, entry in all_items:
+        title = entry.title
+        link = entry.link
+        pubdate = convert_pubdate(entry)
+        image_url = get_image(entry, link)
 
-            items_html.append(render_item_html(title, link, pubdate, image_url))
+        items_html.append(render_item_html(title, link, pubdate, image_url))
+        time.sleep(0.1 + random.random() * 0.1)
 
-            time.sleep(0.15 + random.random() * 0.15)
-
-    body_html = build_email_body(items_html)
-    send_email(body_html)
+    send_email(build_email_body(items_html))
 
 
 if __name__ == "__main__":
