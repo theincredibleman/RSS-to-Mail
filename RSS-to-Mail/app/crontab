@@ -1,3 +1,0 @@
-#Use for testing to send emails every minute:
-#* * * * * /usr/local/bin/python /app/digest.py
-0 7,19 * * * /usr/local/bin/python /app/digest.py
