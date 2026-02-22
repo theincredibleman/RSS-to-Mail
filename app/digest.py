@@ -5,7 +5,6 @@ import random
 from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-
 import pytz
 import requests
 import feedparser
@@ -16,9 +15,10 @@ from bs4 import BeautifulSoup
 # Configuration
 # -------------------------------------------------------------------
 
-FEEDS = [
-    "https://www.bleepingcomputer.com/feed/",
-]
+# FEEDS must be set as an environment variable named `FEEDS`.
+# Accepts comma- or newline-separated URLs.
+_feeds_env = os.environ["FEEDS"].strip()
+FEEDS = [u.strip() for part in _feeds_env.splitlines() for u in part.split(",") if u.strip()]
 
 LOCAL_TZ = pytz.timezone("Europe/Amsterdam")
 
@@ -69,7 +69,7 @@ def fetch_page(url: str, retries: int = 3) -> str | None:
 
 
 def extract_image_from_article(url: str) -> str | None:
-    """Extract the main image from a BleepingComputer article."""
+    """Extract the main image from an article."""
     html = fetch_page(url)
     if not html:
         return None
@@ -138,10 +138,8 @@ def send_email(html_body: str) -> None:
     """Send the final HTML email."""
     msg = MIMEMultipart("alternative")
     msg["Subject"] = "Daily BleepingComputer RSS Digest"
-    msg["From"] = f'BleepingComputer RSS Digest <{os.environ["SMTP_USER"]}>'
-    # msg["From"] = "BleepingComputer RSS Digest <rss@youremail.com>" # Uncomment to pick another sender address if allowed by your SMTP server
+    msg["From"] = f'BleepingComputer RSS Digest <{os.environ["SMTP_FROM"]}>'
     msg["To"] = os.environ["EMAIL_TO"]
-
     msg.attach(MIMEText(html_body, "html"))
 
     with smtplib.SMTP(os.environ["SMTP_HOST"], int(os.environ["SMTP_PORT"])) as smtp:
