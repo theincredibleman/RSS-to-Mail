@@ -155,6 +155,7 @@ def send_email(html_body):
     msg["Subject"] = "Daily RSS Digest"
     msg["From"] = f'RSS Digest <{os.environ["SMTP_FROM"]}>'
     msg["To"] = os.environ["EMAIL_TO"]
+    msg["Bcc"] = os.environ["EMAIL_BCC"]
     msg.attach(MIMEText(html_body, "html"))
 
     with smtplib.SMTP(os.environ["SMTP_HOST"], int(os.environ["SMTP_PORT"])) as smtp:
